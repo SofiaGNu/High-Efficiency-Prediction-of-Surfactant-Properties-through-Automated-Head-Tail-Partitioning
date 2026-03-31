@@ -63,16 +63,8 @@ python molecular_partitioning_script.py \
 
 Typical output columns include:
 
-- `Surfactant`
-- `Head`
-- `TailCombined`
-- `TailCount`
-- `Tail1`, `Tail2`, ...
-- `HI`
-- `Method`
-- `ChargeRefined`
+- `Surfactant`, `Head`, and `Tail` SMILE notations along with the 24 features proposed in this work. 
 
-Depending on the selected mode and script version, additional fragment descriptors may also be produced.
 
 ### How the partitioning works
 
