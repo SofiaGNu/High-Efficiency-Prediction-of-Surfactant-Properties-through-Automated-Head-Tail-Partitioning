@@ -102,42 +102,28 @@ This pattern is used throughout the modelling workflows and is one of the main r
 
 In addition to the code and trained models, this repository provides all results generated for the datasets studied in this work.  
 
-The calculated molecular features (descriptors) are stored in `.xlsx` files, while the visual representations of the head–tail partitioning for each molecule are provided as compressed `.zip` files.  
+The calculated molecular features (descriptors) are stored in `.xlsx` files, while the visual representations of the head–tail partitioning for each molecule and clustering are provided as compressed `.zip` files.  All data, descriptors, models, and clustering results are organized into three main groups according to the source dataset and target property: **Qin**, **Seddon**, and **pC20**.  
 
-### Log(CMC)  
+- **Qin dataset**  
+  Used exclusively for **CMC prediction**. It contains experimental CMC values for a diverse set of surfactants and is employed to train and evaluate machine learning models and clustering analyses focused on micellization behavior.  
 
-Two datasets are used to build models for predicting critical micelle concentration (CMC):  
+- **Seddon dataset**  
+  Used for multiple interfacial properties, including:  
+  - CMC  
+  - Surface tension  
+  - Langmuir constant (Kₗ)  
+  - Maximum surface excess concentration (τₘₐₓ)   
 
-- Qin et al. compiled experimental CMC data for 202 surfactants, including 122 nonionic, 35 cationic, 34 anionic, and 11 zwitterionic surfactants. An eXtreme Gradient Boosting (XGBoost) model was trained using a maximum tree depth of 5 and a gamma value of 0.1.  
+- **pC20 dataset (Li et al.)**  
+  Used for **adsorption efficiency (pC20)** prediction.
 
-- Seddon et al. reported CMC data for 91 surfactants. A Partial Least Squares (PLS) regression model with 12 principal components (PCs) was applied.  
-
----
-
-### Surface Tension  
-
-Surface tension data for the same set of 91 surfactants reported by Seddon et al. are also included. Their methodology involves independently predicting the Langmuir constant, the CMC, and the maximum surface excess concentration (τₘₐₓ), and subsequently using these values in the Szyszkowski equation to estimate surface tension.  
-
-PLS regression with 16 principal components was employed. Notably, Seddon et al. were among the first to explicitly correlate interfacial properties with molecular descriptors, making this dataset particularly valuable.  
-
----
+Therefore, the properties evaluated are:
 
 ### Log(KL) – Langmuir Constant  
 
 The dataset reported by Seddon et al. includes 154 hydrocarbon surfactants categorized into:  
 
-- 44 ethoxylates  
-- 31 sulphates  
-- 20 alcohols  
-- 14 carboxylates  
-- 14 amides  
-- 6 betaines  
-- 6 sulphonates  
-- 5 tetra-alkyl ammonium surfactants  
-- 4 glucosides  
-- 4 pyrrolidinones  
-- 3 pyridinium-based surfactants  
-- 3 glyceryl-based surfactants  
+- 44 ethoxylates , 31 sulphates , 20 alcohols , 14 carboxylates, 14 amides, 6 betaines, 6 sulphonates, 5 tetra-alkyl ammonium surfactants, 4 glucosides, 4 pyrrolidinones, 3 pyridinium-based surfactants, 3 glyceryl-based surfactants  
 
 A PLS regression model with 13 principal components was used.  
 
@@ -148,6 +134,19 @@ A PLS regression model with 13 principal components was used.
 Values of τₘₐₓ for the same set of 154 surfactants were also reported by Seddon et al.  
 
 An MLPRegressor model was employed, consisting of two hidden layers with 8 and 3 neurons, respectively. The hyperbolic tangent (tanh) activation function was used, with a learning rate of 0.1.  
+
+---
+### Log(CMC)  
+
+Two datasets are used to build models for predicting critical micelle concentration (CMC):  
+
+- Qin et al. compiled experimental CMC data for 202 surfactants, including 122 nonionic, 35 cationic, 34 anionic, and 11 zwitterionic surfactants. An eXtreme Gradient Boosting (XGBoost) model was trained using a maximum tree depth of 5 and a gamma value of 0.1.  
+
+- Seddon et al. reported CMC data for 91 surfactants. A Partial Least Squares (PLS) regression model with 12 principal components (PCs) was applied.  
+
+### Surface Tension  
+
+Surface tension data for the same set of 91 surfactants reported by Seddon et al. are also included. PLS regression with 16 principal components was employed. Notably, Seddon et al. were among the first to explicitly correlate interfacial properties with molecular descriptors, making this dataset particularly valuable.  
 
 ---
 
