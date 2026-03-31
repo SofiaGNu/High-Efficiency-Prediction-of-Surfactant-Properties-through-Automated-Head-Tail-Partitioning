@@ -157,3 +157,16 @@ Li et al. reported a dataset comprising 124 surfactants, including quaternary am
 Following their approach, an MLPRegressor model was implemented with two hidden layers of 50 neurons each. The relu activation function and the lbfgs solver were used, corresponding to the optimal hyperparameter combination reported in the original study.  
 
 ---
+### Additional Dataset: HLB  
+
+In addition to the main datasets, molecular features and head–tail partitioning results are also provided for a dataset of **120 nonionic surfactants** used for hydrophile–lipophile balance (HLB) analysis.  
+
+This dataset includes ethoxylated alcohols, ethoxylated fatty acid esters, ethoxylated dialkyl acids, and ethoxylated alkylphenols. HLB values were calculated following the group contribution method reported by Guo et al.  
+
+Although no predictive models are developed for this dataset, it is included to demonstrate the applicability of the domain-specific descriptor framework and head–tail partitioning methodology to classical surfactant design parameters such as HLB.  
+
+**References:**  
+Qin, S.; Jin, T.; Van Lehn, R. C.; Zavala, V. M. *Predicting Critical Micelle Concentrations for Surfactants Using Graph Convolutional Neural Networks*. J. Phys. Chem. B 2021, 125 (37), 10610–10620.
+Seddon, D.; Müller, E. A.; Cabral, J. T. *Machine Learning Hybrid Approach for the Prediction of Surface Tension Profiles of Hydrocarbon Surfactants in Aqueous Solution*. J. Colloid Interface Sci. 2022, 625, 328–339.
+Li, S.; Mao, X.; Cao, X.; Feng, Y.; Zhang, Y.; Yin, H. *Visualizing Molecular Structure—Adsorption Efficiency Relationship through an Interpretable Machine Learning Strategy*. Colloids Surf. A Physicochem. Eng. Asp. 2025, 712, 136400.
+Guo, X.; Rong, Z.; Ying, X. *Calculation of Hydrophile–Lipophile Balance for Polyethoxylated Surfactants by Group Contribution Method*. J. Colloid Interface Sci. 2006, 298 (1), 441–450.  
