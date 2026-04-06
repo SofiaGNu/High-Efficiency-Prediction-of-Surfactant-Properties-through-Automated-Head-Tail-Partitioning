@@ -159,6 +159,8 @@ Although no predictive models are developed for this dataset, it is included to 
 
 **References:**  
 Qin, S.; Jin, T.; Van Lehn, R. C.; Zavala, V. M. *Predicting Critical Micelle Concentrations for Surfactants Using Graph Convolutional Neural Networks*. J. Phys. Chem. B 2021, 125 (37), 10610–10620.
+
 Seddon, D.; Müller, E. A.; Cabral, J. T. *Machine Learning Hybrid Approach for the Prediction of Surface Tension Profiles of Hydrocarbon Surfactants in Aqueous Solution*. J. Colloid Interface Sci. 2022, 625, 328–339.
+
 Li, S.; Mao, X.; Cao, X.; Feng, Y.; Zhang, Y.; Yin, H. *Visualizing Molecular Structure—Adsorption Efficiency Relationship through an Interpretable Machine Learning Strategy*. Colloids Surf. A Physicochem. Eng. Asp. 2025, 712, 136400.
 Guo, X.; Rong, Z.; Ying, X. *Calculation of Hydrophile–Lipophile Balance for Polyethoxylated Surfactants by Group Contribution Method*. J. Colloid Interface Sci. 2006, 298 (1), 441–450.  
