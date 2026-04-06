@@ -11,7 +11,7 @@ import os, statistics, argparse
 INPUT_EXCEL = None
 SHEET = None
 SMILES_COLUMN = None
-DEFAULT_SMILES = ["CCCCCCCCCCCC(=O)NCCC[N+](C)(C)CC([O-])=O",]
+DEFAULT_SMILES = ["CCCCCCCCCCCC(=O)NCCC[N+](C)(C)C(O)C[S](O)(=O)=O"]
 
 MIN_TAIL_CARBONS = 3          # minimum carbon cluster size to qualify as tail
 MAX_POLAR_DISTANCE = 1        # BFS layers to expand head from hetero/charged seeds
@@ -22,8 +22,8 @@ MAX_PROMOTION_DISTANCE = 1
 DEMOTE_EARLY_POLAR_SUBCLUSTER = True  # Demote early weak polar sub-cluster separated by neutral bridge from dominant polar cluster
 BRIDGE_CHARGE_THRESH = 0.10  # |q| threshold to consider a bridge carbon weakly polar
 
-DOMINANT_CLUSTER_CHARGE_RATIO = 1.7  # Minimum dominant/subcluster |q| sum ratio to allow demotion
-REASSIGN_SMALL_TAILS = True     # Reassign very small tails into head
+DOMINANT_CLUSTER_CHARGE_RATIO = 2.0  # Minimum dominant/subcluster |q| sum ratio to allow demotion
+REASSIGN_SMALL_TAILS = False     # Reassign very small tails into head
 SMALL_TAIL_MAX_SIZE = 3          # Max size of a tail sub-component; if <=, move to head
 
 # Global set of halogens (used to avoid classifying them as head and move them to tail)
@@ -39,8 +39,8 @@ def mol_ok(smi):
     return Chem.MolFromSmiles(smi)
 
 def is_hetero(atom):
-    """Define hetero átomos para semillas de cabeza.
-    Excluimos halógenos (F, Cl, Br, I) para no fragmentar cadenas perfluoradas; se consideran parte hidrofóbica.
+    """Define hetero atoms for head seeds.
+    We exclude halogens (F, Cl, Br, I) to avoid splitting perfluorinated chains; they are considered hydrophobic.
     """
     return atom.GetAtomicNum() not in (1,6,9,17,35,53)
 
@@ -65,7 +65,69 @@ def compute_gasteiger_abs(mol):
         charges[i]=abs(q) if q is not None else 0.0
     return charges
 
-# ------------- Identificación de colas ------------- #
+def charge_refinement_details(mol, head, tails):
+    """Compute the same promotion logic as refine_with_charges, but keep per-atom diagnostics."""
+    details = {
+        'enabled': REFINE_WITH_CHARGES and bool(tails),
+        'charges': {},
+        'near': set(),
+        'component_thresholds': [],
+        'promoted': [],
+    }
+    if not REFINE_WITH_CHARGES or not tails:
+        return details
+
+    charges = compute_gasteiger_abs(mol)
+    details['charges'] = charges
+    if not any(charges.values()):
+        return details
+
+    head_set = set(head)
+    frontier = list(head_set)
+    dist = {i: 0 for i in head_set}
+    near = set(head_set)
+    while frontier:
+        idx = frontier.pop(0)
+        if dist[idx] >= MAX_PROMOTION_DISTANCE:
+            continue
+        a = mol.GetAtomWithIdx(idx)
+        for nb in a.GetNeighbors():
+            nidx = nb.GetIdx()
+            if nidx not in dist:
+                dist[nidx] = dist[idx] + 1
+                if dist[nidx] <= MAX_PROMOTION_DISTANCE:
+                    near.add(nidx)
+                    frontier.append(nidx)
+    details['near'] = near
+
+    for comp_id, comp in enumerate(tails, start=1):
+        comp = set(comp)
+        comp_ch = [charges[i] for i in comp]
+        med = statistics.median(comp_ch) if comp_ch else 0.0
+        thresh = med * CHARGE_PROMOTION_FACTOR if med > 0 else max(comp_ch or [0]) * 0.6
+        details['component_thresholds'].append({
+            'component_id': comp_id,
+            'size': len(comp),
+            'median_abs_charge': med,
+            'threshold': thresh,
+        })
+        for idx in sorted(comp):
+            atom = mol.GetAtomWithIdx(idx)
+            hetero_nb = hetero_neighbors(atom)
+            qualifies = idx in near and charges[idx] >= thresh and hetero_nb > 0
+            if qualifies:
+                details['promoted'].append({
+                    'atom_idx': idx,
+                    'symbol': atom.GetSymbol(),
+                    'abs_charge': charges[idx],
+                    'threshold': thresh,
+                    'hetero_neighbors': hetero_nb,
+                    'component_id': comp_id,
+                    'distance_to_head': dist.get(idx),
+                })
+    return details
+
+# ------------- Tail identification ------------- #
 def hydrophobic_carbon_candidates(mol):
     cand=[]
     for a in mol.GetAtoms():
@@ -100,13 +162,13 @@ def select_tail_components(mol, comps):
     largest=max(sizes)
     selected=[c for c in comps if len(c)>=MIN_TAIL_CARBONS and len(c)>=0.5*largest]
     if not selected:
-        # fallback: toma la mayor si supera mínimo-2 (relajar un poco)
+        # fallback: take the largest if it exceeds minimum-2 (slightly relaxed)
         biggest=max(comps, key=len)
         if len(biggest)>=max(4, MIN_TAIL_CARBONS-2):
             selected=[biggest]
     return selected #[:MAX_TAILS_OUTPUT]
 
-# ------------- Identificación de cabeza ------------- #
+    # ------------- Head identification ------------- #
 def head_seed_atoms(mol):
     seeds=set()
     for a in mol.GetAtoms():
@@ -128,49 +190,36 @@ def expand_head(mol, seeds, tails):
         for nb in a.GetNeighbors():
             nidx=nb.GetIdx()
             if nidx in head or nidx in tail_atoms: continue
-            # expandimos si hetero o proximidad dentro de MAX_POLAR_DISTANCE
-            # Permitimos halógenos sueltos (no usados como semillas) que estén próximos a la región polar; las cadenas per-halogenadas se corrigen más tarde.
+            # expand if hetero or within MAX_POLAR_DISTANCE proximity
+            # Allow isolated halogens (not used as seeds) near the polar region; per-halogenated chains are corrected later.
             if is_hetero(nb) or dist[idx] < MAX_POLAR_DISTANCE:
                 head.add(nidx)
                 dist[nidx]=dist[idx]+1
                 queue.append(nidx)
-    if not head:  # fallback: al menos un hetero si existe
+    if not head:  # fallback: at least one hetero atom if present
         for a in mol.GetAtoms():
             if is_hetero(a):
                 head.add(a.GetIdx())
                 break
     return head
 
-# ------------- Refinamiento por cargas ------------- #
+# ------------- Charge-based refinement ------------- #
 def refine_with_charges(mol, head, tails):
     if not REFINE_WITH_CHARGES or not tails:
         return head, tails, False
-    charges=compute_gasteiger_abs(mol)
+    details = charge_refinement_details(mol, head, tails)
+    charges = details['charges']
     if not any(charges.values()):
         return head, tails, False
     head_set=set(head)
     promoted=set()
-    # proximidad a cabeza (BFS)
-    frontier=list(head_set); dist={i:0 for i in head_set}
-    near=set(head_set)
-    while frontier:
-        idx=frontier.pop(0)
-        if dist[idx] >= MAX_PROMOTION_DISTANCE: continue
-        a=mol.GetAtomWithIdx(idx)
-        for nb in a.GetNeighbors():
-            nidx=nb.GetIdx()
-            if nidx not in dist:
-                dist[nidx]=dist[idx]+1
-                if dist[nidx]<=MAX_PROMOTION_DISTANCE:
-                    near.add(nidx)
-                    frontier.append(nidx)
+    near = details['near']
+    threshold_map = {d['component_id']: d['threshold'] for d in details['component_thresholds']}
     refined=[]
-    for comp in tails:
+    for comp_id, comp in enumerate(tails, start=1):
         if not comp:
             refined.append(comp); continue
-        comp_ch=[charges[i] for i in comp]
-        med = statistics.median(comp_ch) if comp_ch else 0.0
-        thresh = med*CHARGE_PROMOTION_FACTOR if med>0 else max(comp_ch or [0])*0.6
+        thresh = threshold_map.get(comp_id, 0.0)
         new_comp=set(comp)
         for idx in list(comp):
             if idx in near and charges[idx] >= thresh and hetero_neighbors(mol.GetAtomWithIdx(idx))>0:
@@ -180,6 +229,51 @@ def refine_with_charges(mol, head, tails):
     if promoted:
         head_set |= promoted
     return head_set, refined, bool(promoted)
+
+def diagnose_charge_refinement(smiles_list):
+    rows = []
+    for smi in smiles_list:
+        mol = mol_ok(smi)
+        if not mol:
+            rows.append({'Surfactant': smi, 'Valid': False})
+            continue
+        candidates = hydrophobic_carbon_candidates(mol)
+        comps = carbon_components_from_candidates(mol, candidates)
+        tails = select_tail_components(mol, comps)
+        seeds = head_seed_atoms(mol)
+        head = expand_head(mol, seeds, tails)
+        cleaned = [set(a for a in t if a not in head) for t in tails]
+        details = charge_refinement_details(mol, head, cleaned)
+
+        if not details['promoted']:
+            rows.append({
+                'Surfactant': smi,
+                'Valid': True,
+                'ChargeRefined': False,
+                'PromotedAtomIdx': None,
+                'AtomSymbol': None,
+                'AbsCharge': None,
+                'Threshold': None,
+                'HeteroNeighbors': None,
+                'ComponentId': None,
+                'Reason': 'No atom met near-head + charge-threshold + hetero-neighbor criteria'
+            })
+            continue
+
+        for item in details['promoted']:
+            rows.append({
+                'Surfactant': smi,
+                'Valid': True,
+                'ChargeRefined': True,
+                'PromotedAtomIdx': item['atom_idx'],
+                'AtomSymbol': item['symbol'],
+                'AbsCharge': item['abs_charge'],
+                'Threshold': item['threshold'],
+                'HeteroNeighbors': item['hetero_neighbors'],
+                'ComponentId': item['component_id'],
+                'Reason': f"near head, |q| >= threshold, hetero_neighbors={item['hetero_neighbors']}"
+            })
+    return pd.DataFrame(rows)
 
 # ------------- Assembly and HI calculation ------------- #
 def frag_smiles(mol, atoms):
@@ -200,7 +294,7 @@ def split_head_tail(mol):
     candidates = hydrophobic_carbon_candidates(mol)
     comps = carbon_components_from_candidates(mol, candidates)
     tails = select_tail_components(mol, comps)
-    # 2. Cabeza
+    # 2. Head
     seeds = head_seed_atoms(mol)
     head = expand_head(mol, seeds, tails) 
     counterion_atoms = set()  
@@ -235,7 +329,7 @@ def split_head_tail(mol):
                     t -= counterion_atoms
                 removed_counterion_atoms = set(counterion_atoms)
                 counterion_removed_flag = True
-    # 3. Limpia solapamiento (si algún tail comparte heads, quita esos átomos de la cola)
+    # 3. Clean overlap (if any tail shares head atoms, remove those atoms from the tail)
     cleaned=[]
     for t in tails:
         cleaned.append(set(a for a in t if a not in head))
@@ -275,22 +369,23 @@ def split_head_tail(mol):
         ri = mol.GetRingInfo()
         ring_atoms_list = ri.AtomRings()
         for ring in ring_atoms_list:
-            # considerar sólo anillos aromáticos de C puros
+            # consider only pure C aromatic rings
             if not all(mol.GetAtomWithIdx(i).GetIsAromatic() and mol.GetAtomWithIdx(i).GetAtomicNum()==6 for i in ring):
                 continue
             ring_set = set(ring)
-            # excluir si ya fue promovido como hetero/cargado (no aplica porque son puros C) o si ring ya está totalmente en una cola
+            # exclude if already promoted as hetero/charged (not applicable here because these are pure C)
+            # or if the ring is already fully in a tail
             in_head = ring_set & head
             if not in_head:
-                continue  # nada en cabeza -> ya está íntegro en cola o fuera
-            # mover anillo completo a una cola
+                continue  # nothing in head -> already fully in tail or outside
+            # move full ring to a tail
             target_tail = None
             for t in tails:
                 if t & ring_set:
                     target_tail = t
                     break
             if target_tail is None:
-                # elegir cola más grande si existe, si no crear nueva
+                # choose largest tail if present, otherwise create a new one
                 if tails:
                     target_tail = max(tails, key=len)
                 else:
@@ -342,17 +437,17 @@ def split_head_tail(mol):
                     cid=nb.GetIdx()
                     if cid not in head_set:
                         head_set.add(cid); changed=True
-                    # remover de colas si estaba
+                        # remove from tails if present
                     for t in tails_list:
                         if cid in t: t.remove(cid)
-            # remover oxígeno de colas
+                    # remove oxygen from tails
             for t in tails_list:
                 if oidx in t: t.remove(oidx)
         return head_set, changed
     head, expanded_alcohol = expand_simple_alcohol_head(mol, head, tails)
     if expanded_alcohol:
         head_failsafe = True
-    # 6c. Failsafe: ningún átomo sin clasificar
+    # 6c. Failsafe: no unassigned atoms
     all_atoms = set(range(mol.GetNumAtoms()))
     tail_union = set().union(*tails) if tails else set()
     unassigned = all_atoms - head - tail_union
@@ -369,14 +464,14 @@ def split_head_tail(mol):
         ring_atoms_list = ri.AtomRings()
         for ring in ring_atoms_list:
             ring_set = set(ring)
-            # sólo considerar anillos aromáticos todos C
+            # only consider aromatic rings made entirely of C
             if not all(mol.GetAtomWithIdx(i).GetIsAromatic() and mol.GetAtomWithIdx(i).GetAtomicNum()==6 for i in ring_set):
                 continue
             head_in_ring = ring_set & head
             if 0 < len(head_in_ring) < len(ring_set):
-                # fragmentado; evaluar si es stub (1 o 2 carbonos) pegado a hetero externo
+                # fragmented; evaluate if it is a stub (1 or 2 carbons) attached to external hetero
                 if len(head_in_ring) <= 2:
-                    # mover esos carbonos a una cola (preferir la cola que ya tenga parte del anillo o la más grande)
+                    # move those carbons to a tail (prefer a tail that already contains part of the ring, or the largest)
                     target_tail = None
                     for t in tails:
                         if t & ring_set:
@@ -401,7 +496,7 @@ def split_head_tail(mol):
     # Move the carbon component and ALL directly bound halogens.
     # Criteria:
     #   - Carbon component where non-carbon neighbors are only halogens or (on at most one carbon) a terminal O/S.
-    #   - Fraction of carbons with ≥1 halogen ≥ 70%.
+    #   - Fraction of carbons with ≥1 halogen ≥ 70%.Modified to 100%
     #   - Intersects head (part was misclassified as head).
     #   - Does not completely remove real hetero head (non-halogen) leaving it empty.
     perfluoro_moved = False  # mantiene nombre legado
@@ -438,7 +533,7 @@ def split_head_tail(mol):
         for ci in comp:
             if any(nb.GetAtomicNum() in HALOGENS for nb in mol.GetAtomWithIdx(ci).GetNeighbors()):
                 halogenated_carbons+=1
-        if halogenated_carbons==0 or halogenated_carbons/len(comp) < 0.7:
+        if halogenated_carbons==0 or halogenated_carbons/len(comp) < 1:
             continue
         # Does it intersect head?
         if not (comp & head):
@@ -446,7 +541,7 @@ def split_head_tail(mol):
         head_remaining = head - comp
         has_real_hetero = any(mol.GetAtomWithIdx(h).GetAtomicNum() not in (1,6,*HALOGENS) for h in head)
         if not head_remaining and not has_real_hetero:
-            # no mover: dejar algo polar como cabeza mínima
+            # do not move: keep a minimal polar head
             continue
         # Gather halogens bound to the component
         halogen_atoms=set()
@@ -483,7 +578,7 @@ def split_head_tail(mol):
                 continue
             # If all non-H neighbors are in tail (and none in head except the halogen itself) => move
             if all((nid in tail_union_all) for nid in neighs):
-                # Colocar en la cola que contenga el primer vecino
+                # Place in the tail that contains the first neighbor
                 placed=False
                 for t in tails:
                     if neighs[0] in t:
@@ -557,9 +652,9 @@ def split_head_tail(mol):
                     for nb in a_cur.GetNeighbors():
                         nid=nb.GetIdx()
                         if nid in visited: continue
-                        # no volver al oxígeno inicial salvo primer paso implícito
+                        # do not return to the initial oxygen except for the implicit first step
                         visited.add(nid)
-                        # permitir avanzar por carbonos u oxígenos en head
+                        # allow traversal through carbons or oxygens in head
                         if nb.GetAtomicNum() in (6,8):
                             frontier.append((nid, depth+1))
                 return False
@@ -636,10 +731,10 @@ def split_head_tail(mol):
             )
         dominant = max(comp_metrics, key=dominance_key)
         dom_frag, dom_abs, dom_formal, dom_hetero = dominant
-        # Candidatos: sin carga formal y con abs_sum significativamente menor
+        # Candidates: no formal charge and significantly lower abs_sum
         candidates = [m for m in comp_metrics if m[0] is not dom_frag]
 
-        # Preconstruir acceso rápido a head para BFS
+        # Prebuild quick head access for BFS
         head_set_local = set(head)
 
         from collections import deque
@@ -651,7 +746,7 @@ def split_head_tail(mol):
             while dq:
                 cur = dq.popleft()
                 if cur in target_set:
-                    # reconstruir
+                    # reconstruct
                     path = [cur]
                     while cur in parent:
                         cur = parent[cur]
@@ -671,21 +766,21 @@ def split_head_tail(mol):
         demote_total = set()
         for frag, abs_sum, formal_sum, hetero_count in candidates:
             if formal_sum != 0:
-                continue  # tiene carga formal, potencial cabeza real (evitar gemini falsa detección)
+                continue  # has formal charge, potential real head (avoid false gemini detection)
             if dom_abs <= 0 or abs_sum <= 0:
                 continue
             ratio = dom_abs / max(abs_sum, 1e-6)
             if ratio < DOMINANT_CLUSTER_CHARGE_RATIO:
-                continue  # dominante no es suficientemente más polar
-            # Buscar ruta mínima en el subgrafo cabeza
+                continue  # dominant cluster is not sufficiently more polar
+            # Find shortest path in the head subgraph
             path = shortest_path_between_sets(list(frag), list(dom_frag), head_set_local)
             if not path:
                 continue
-            # Excluir nodos terminales pertenecientes a frag o dom_frag para evaluar puente
+            # Exclude terminal nodes belonging to frag or dom_frag to evaluate bridge
             inner = [n for n in path if (n not in frag and n not in dom_frag)]
             if not inner:
                 continue
-            # Contar carbonos poco polares consecutivos
+            # Count consecutive weakly polar carbons
             seq_count = 0
             max_seq = 0
             for n in inner:
@@ -701,7 +796,7 @@ def split_head_tail(mol):
             demote_total |= demote_set
 
         if demote_total:
-            # Seleccionar cola de destino (adyacente o mayor)
+            # Select destination tail (adjacent or largest)
             for u in demote_total:
                 target = None
                 ua = mol.GetAtomWithIdx(u)
@@ -718,7 +813,7 @@ def split_head_tail(mol):
                     target.add(u)
                     early_polar_cluster_demoted = True
             if early_polar_cluster_demoted:
-                # Recalcular fragmentos cabeza finales
+                # Recompute final head fragments
                 def _recompute_head_fragments2(hset):
                     comps = []
                     visited = set()
@@ -743,7 +838,7 @@ def split_head_tail(mol):
         # Iterate each tail; if a full tail is small, move it.
         # Also decompose each tail into connected subcomponents for robustness.
         new_tails = []
-        subs_small_moved = []  # almacenar subcomponentes pequeños movidos para rescate si se queda sin cola
+        subs_small_moved = []  # store moved small subcomponents in case tail rescue is needed
         for t in tails:
             # Build connected subcomponents within t
             subs = []
@@ -775,7 +870,7 @@ def split_head_tail(mol):
         # If all tails were small and reassigned, rescue the largest to ensure at least one tail
         if not tails and subs_small_moved:
             largest_small = max(subs_small_moved, key=len)
-            # quitar de cabeza y reinstaurar como cola
+            # remove from head and restore as tail
             for ai in largest_small:
                 if ai in head:
                     head.remove(ai)
@@ -803,7 +898,7 @@ def split_head_tail(mol):
             head_fragments = _recompute_head_fragments_small(head)
 
     if EXCLUDE_COUNTERIONS and removed_counterion_atoms:
-        head -= removed_counterion_atoms  # purga final
+        head -= removed_counterion_atoms  # final purge
     head_smiles = frag_smiles(mol, head)
     head_frag_smiles = [frag_smiles(mol, h) for h in head_fragments]
     tail_smiles_list = [frag_smiles(mol, t) for t in tails]
@@ -898,7 +993,7 @@ def promote_linking_amide_carbonyl(mol, head_set, tails_list):
     oxy_head = sum(1 for i in head_set if mol.GetAtomWithIdx(i).GetAtomicNum()==8)
     if oxy_head < MIN_SUGAR_OH:
         return head_set, tails_list
-    # Recorremos átomos de la cola buscando carbonilos amida/éster
+    # Traverse tail atoms looking for amide/ester carbonyls
     for t in tails_list:
         for idx in list(t):
             a = mol.GetAtomWithIdx(idx)
@@ -915,7 +1010,7 @@ def promote_linking_amide_carbonyl(mol, head_set, tails_list):
                     neigh_N = other.GetIdx()
             if dbl_O is None or neigh_N is None:
                 continue
-            # ¿Conecta con cabeza? (algún vecino O o C en head)
+            # Connected to head? (any O or C neighbor in head)
             linked_head = (
                 any(nb.GetIdx() in head_set and nb.GetAtomicNum()==8 for nb in a.GetNeighbors()) or
                 any(nb.GetIdx() in head_set and nb.GetAtomicNum()==6 for nb in a.GetNeighbors())
@@ -963,7 +1058,7 @@ def promote_head_bridges(mol, head_set, tails_list, max_bridge_len=2):
     candidate = all_atoms - head_set - tail_union
     if not candidate:
         return head_set, tails_list
-    # construir componentes candidatas sólo de carbonos
+    # build candidate components made only of carbons
     visited=set()
     bridges=[]
     for idx in list(candidate):
@@ -987,7 +1082,7 @@ def promote_head_bridges(mol, head_set, tails_list, max_bridge_len=2):
                     continue
                 stack.append(j)
         if only_carbon and 0 < len(comp) <= max_bridge_len:
-            # comprobar si comp conecta dos (o más) átomos head distintos
+            # check whether comp connects two (or more) distinct head atoms
             neighbor_heads=set()
             for i in comp:
                 ai=mol.GetAtomWithIdx(i)
@@ -1019,7 +1114,7 @@ def enforce_full_benzenes(mol, head_set, tails_list):
                 if not rset.issubset(target):
                     target |= rset
                 head_set -= rset
-                # quitar de otras colas por sanidad
+                # remove from other tails for consistency
                 for t in tails_list:
                     if t is not target:
                         t -= rset
@@ -1037,15 +1132,15 @@ def promote_carbohydrate_rings(mol, head_set, tails_list):
     ring_info = mol.GetRingInfo()
     rings = ring_info.AtomRings()
     head_set = set(head_set)
-    # Precalcular tail union para diferenciar CH2OH vs cadena larga
+    # Precompute tail union to distinguish CH2OH vs long chain
     tail_union = set().union(*tails_list) if tails_list else set()
     for ring in rings:
         if len(ring) not in (5,6):
             continue
         ring_set = set(ring)
-        # contar oxígenos en el anillo
+        # count oxygens in the ring
         oxy_in_ring = sum(1 for i in ring if mol.GetAtomWithIdx(i).GetAtomicNum()==8)
-        # oxígenos adyacentes (exocíclicos) directamente unidos a átomos del anillo
+        # adjacent (exocyclic) oxygens directly bound to ring atoms
         oxy_exo = set()
         for i in ring:
             a = mol.GetAtomWithIdx(i)
@@ -1054,10 +1149,10 @@ def promote_carbohydrate_rings(mol, head_set, tails_list):
                     oxy_exo.add(nb.GetIdx())
         oxy_total = oxy_in_ring + len(oxy_exo)
         if oxy_total < 3:
-            continue  # no es claramente carbohidrato
-        # Construir conjunto azúcar
+            continue  # not clearly carbohydrate-like
+        # Build sugar atom set
         sugar_atoms = set(ring_set) | oxy_exo
-        # Añadir carbonos CH2OH (carbono fuera del anillo conectado a un carbono del anillo y a un oxígeno)
+        # Add CH2OH carbons (carbon outside the ring connected to a ring carbon and an oxygen)
         for i in ring:
             a = mol.GetAtomWithIdx(i)
             for nb in a.GetNeighbors():
@@ -1065,11 +1160,11 @@ def promote_carbohydrate_rings(mol, head_set, tails_list):
                 if nidx in ring_set:
                     continue
                 if nb.GetAtomicNum()==6:
-                    # tiene oxígeno vecino fuera del anillo -> probable CH2OH
+                    # has oxygen neighbor outside ring -> likely CH2OH
                     has_exo_O = any(o.GetAtomicNum()==8 and o.GetIdx() not in ring_set for o in nb.GetNeighbors())
                     if has_exo_O:
-                        # asegurarnos de que no es inicio de la cola larga (heurística: número de carbonos consecutivos lineales >2 alejados del anillo)
-                        # contamos cadena lineal desde nb excluyendo caminos que regresen al anillo
+                        # ensure this is not the beginning of the long tail (heuristic: >2 consecutive linear carbons away from ring)
+                        # count linear chain from nb excluding paths that return to ring
                         linear_len=0
                         visited={i}
                         stack=[(nb,0)]
@@ -1085,13 +1180,13 @@ def promote_carbohydrate_rings(mol, head_set, tails_list):
                                 if nn.GetAtomicNum()==6 and hetero_neighbors(nn)==0:
                                     visited.add(nid)
                                     stack.append((nn,depth+1))
-                        # Si la cadena lineal explorada muy corta (<3) asumimos CH2OH, no tail principal
+                        # If explored linear chain is very short (<3), assume CH2OH and not main tail
                         if linear_len < 3:
                             sugar_atoms.add(nidx)
                             for o in nb.GetNeighbors():
                                 if o.GetAtomicNum()==8:
                                     sugar_atoms.add(o.GetIdx())
-        # Actualizar partición: sacar azúcar de colas, meter en cabeza
+        # Update partition: remove sugar atoms from tails and add to head
         intersect_tail = any(sugar_atoms & t for t in tails_list)
         if intersect_tail:
             for t in tails_list:
@@ -1125,7 +1220,7 @@ def promote_polyol_chains(mol, head_set, tails_list, min_chain_carbons=3):
         idx = atom.GetIdx()
         if atom.GetAtomicNum()!=6 or atom.GetIsAromatic() or idx in head_set or idx in visited:
             continue
-        # Construir componente carbono-alifático conectado
+        # Build connected aliphatic-carbon component
         stack=[idx]; comp=set()
         while stack:
             i=stack.pop()
@@ -1141,7 +1236,7 @@ def promote_polyol_chains(mol, head_set, tails_list, min_chain_carbons=3):
         visited |= comp
         if len(comp) < min_chain_carbons:
             continue
-        # Análisis de oxígenos
+        # Oxygen analysis
         direct_oxy_c=set()
         oxy_atoms=set()
         for cidx in comp:
@@ -1159,17 +1254,17 @@ def promote_polyol_chains(mol, head_set, tails_list, min_chain_carbons=3):
             ca=mol.GetAtomWithIdx(cidx)
             if any(nb.GetIdx() in direct_oxy_c for nb in ca.GetNeighbors() if nb.GetAtomicNum()==6):
                 indirect_c.add(cidx)
-        # Densidad y cobertura
+        # Density and coverage
         if len(direct_oxy_c)/len(comp) < 0.4:
             continue
         if len(direct_oxy_c) + len(indirect_c) != len(comp):
             continue
-        # Oxígenos únicos densidad
+        # Unique oxygen count density
         if len(oxy_atoms) < max(2, math.ceil(len(comp)*0.6)):
             continue
-        # Promover
+        # Promote
         to_move = comp | oxy_atoms
-        # Retirar de tails
+        # Remove from tails
         if any(to_move & t for t in tail_sets):
             for t in tail_sets:
                 if to_move & t:
@@ -1187,7 +1282,7 @@ def refine_heads_split(mol, head_set, tails_list):
         #     - Remaining components are returned as Head1, Head2, ...
         # """
     head_set = set(head_set)
-    # 1. Mover oxígenos puente aromáticos a cola
+    # 1. Move aromatic bridge oxygens to tail
     bridge_os=[]
     for idx in list(head_set):
         a=mol.GetAtomWithIdx(idx)
@@ -1209,7 +1304,7 @@ def refine_heads_split(mol, head_set, tails_list):
                 tails_list.append({oidx})
         head_set.discard(oidx)
 
-    # 2. Componentes conectados en head
+    # 2. Connected components in head
     def components(atom_indices):
         comps=[]; visited=set(); atom_indices=set(atom_indices)
         for i in list(atom_indices):
@@ -1237,7 +1332,7 @@ def refine_heads_split(mol, head_set, tails_list):
             # Move isolated neutral O to tail
             # Avoid degrading if it would be the only existing head
             if a.GetAtomicNum()==8 and a.GetFormalCharge()==0 and not (len(head_set)==1):
-                # intentar añadir a cola con vecino
+                # try adding to a tail with a neighbor
                 neigh_ids={nb.GetIdx() for nb in a.GetNeighbors()}
                 placed=False
                 for t in tails_list:
@@ -1249,10 +1344,10 @@ def refine_heads_split(mol, head_set, tails_list):
                     else:
                         tails_list.append({idx})
                 head_set.discard(idx)
-                continue  # no se añade como fragmento cabeza
+                continue  # do not keep as head fragment
         head_fragments.append(comp)
 
-    # 3. Recalcular head_set desde fragmentos válidos
+    # 3. Recompute head_set from valid fragments
     head_set = set().union(*head_fragments) if head_fragments else set()
     return head_set, head_fragments, tails_list
 
@@ -1328,7 +1423,7 @@ def classify_head_basic(mol, head_atoms:set, head_smiles:str) -> dict:
     elif net_charge < 0:
         head_charge_type = 'anionic'
     else:
-        # Caso residual: mezcla de cargas pero neto 0 que no pasó el primer if (p.ej. formal charges mal asignados)
+        # Residual case: mixed charges with net 0 that did not satisfy the first if (e.g., poorly assigned formal charges)
         head_charge_type = 'mixed'
     return {'HeadO':nO,'HeadN':nN,'HeadS':nS,'EthoxylateUnits':etho_units
             ,'Head_charge_type': head_charge_type}
@@ -1345,9 +1440,9 @@ def _longest_consecutive_apolar_chain(mol, tail_atoms:set, mode:str='fast') -> i
     carbon_tail = [i for i in tail_atoms if mol.GetAtomWithIdx(i).GetAtomicNum()==6]
     if not carbon_tail:
         return 0
-    # Construir lista de vecinos (solo carbonos en cola)
+    # Build neighbor list (tail carbons only)
     neigh = {i:[n.GetIdx() for n in mol.GetAtomWithIdx(i).GetNeighbors() if n.GetIdx() in tail_atoms and mol.GetAtomWithIdx(n.GetIdx()).GetAtomicNum()==6] for i in carbon_tail}
-    if mode != 'full':  # FAST diámetro aproximado (exacto para grafos sin pesos)
+    if mode != 'full':  # FAST approximate diameter (exact for unweighted graphs)
         from collections import deque
         def bfs(start):
             dist={start:0}; q=deque([start])
@@ -1356,7 +1451,7 @@ def _longest_consecutive_apolar_chain(mol, tail_atoms:set, mode:str='fast') -> i
                 for w in neigh[v]:
                     if w not in dist:
                         dist[w]=dist[v]+1; q.append(w)
-            # devuelve nodo más lejano y distancias
+            # returns farthest node and distances
             far=max(dist, key=lambda k: dist[k])
             return far, dist
         any_node = carbon_tail[0]
@@ -1365,7 +1460,7 @@ def _longest_consecutive_apolar_chain(mol, tail_atoms:set, mode:str='fast') -> i
         diameter_edges = max(dist2.values()) if dist2 else 0
         # chain length in number of carbons = edges + 1 (if at least one node)
         return diameter_edges + 1 if carbon_tail else 0
-    # FULL (DFS exhaustivo original)
+    # FULL (original exhaustive DFS)
     best=1
     termini=[i for i in carbon_tail if len(neigh[i])<=1]
     starts = termini if termini else carbon_tail
@@ -1564,7 +1659,7 @@ def draw_partition(mol, head_atoms, tail_atoms_list, out_path=None):
     head_color=(0.12,0.35,0.9)  # blue
     tail_palette=[(0.95,0.55,0.1),(0.15,0.65,0.25),(0.7,0.3,0.75)]  # orange, green, purple
 
-    # Copias para coordenadas
+    # Copy for coordinates
     m = Chem.Mol(mol)
     try:
         from rdkit.Chem import rdDepictor
@@ -1610,9 +1705,9 @@ def draw_partition(mol, head_atoms, tail_atoms_list, out_path=None):
             combo = Image.new('RGB', (head_img.width + tail_img.width, max(head_img.height, tail_img.height)), (255,255,255))
             combo.paste(head_img, (0,0))
             combo.paste(tail_img, (head_img.width,0))
-        elif head_img:  # sólo cabeza
+        elif head_img:  # head only
             combo = head_img
-        elif tail_img:  # sólo cola(s)
+        elif tail_img:  # tail(s) only
             combo = tail_img
         else:  # nothing to highlight; draw simple molecule
             combo = _Draw.MolToImage(m, size=(400,400))
